@@ -1,0 +1,236 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+  VENUE_OWNER
+}
+
+enum SeatType {
+  REGULAR
+  PREMIUM
+  RECLINER
+}
+
+enum SeatStatus {
+  AVAILABLE
+  LOCKED
+  BOOKED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum ShowStatus {
+  UPCOMING
+  OPEN
+  HOUSEFULL
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String?  @unique
+  phone        String?  @unique
+  passwordHash String?
+  googleId     String?  @unique
+  role         Role     @default(USER)
+  isVerified   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  bookings      Booking[]
+  refreshTokens RefreshToken[]
+
+  @@index([email])
+  @@index([phone])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  isRevoked Boolean  @default(false)
+
+  @@index([userId])
+}
+
+model Movie {
+  id           String   @id @default(cuid())
+  title        String
+  description  String?
+  language     String
+  durationMins Int
+  releaseDate  DateTime
+  genre        String[]
+  cast         String[]
+  rating       Float    @default(0)
+  posterUrl    String?
+  trailerUrl   String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  shows Show[]
+
+  @@index([releaseDate])
+  @@index([isActive])
+}
+
+model City {
+  id     String @id @default(cuid())
+  name   String @unique
+  state  String
+
+  venues Venue[]
+}
+
+model Venue {
+  id       String  @id @default(cuid())
+  name     String
+  address  String
+  cityId   String
+  city     City    @relation(fields: [cityId], references: [id])
+  lat      Float?
+  lng      Float?
+  isActive Boolean @default(true)
+
+  screens Screen[]
+
+  @@index([cityId])
+}
+
+model Screen {
+  id        String @id @default(cuid())
+  name      String
+  venueId   String
+  venue     Venue  @relation(fields: [venueId], references: [id])
+  totalRows Int
+  totalCols Int
+
+  seats Seat[]
+  shows Show[]
+
+  @@index([venueId])
+}
+
+model Seat {
+  id        String   @id @default(cuid())
+  screenId  String
+  screen    Screen   @relation(fields: [screenId], references: [id])
+  rowLabel  String
+  colNumber Int
+  seatType  SeatType @default(REGULAR)
+  basePrice Decimal  @db.Decimal(10, 2)
+
+  showSeats ShowSeat[]
+
+  @@unique([screenId, rowLabel, colNumber])
+  @@index([screenId])
+}
+
+model Show {
+  id        String     @id @default(cuid())
+  movieId   String
+  movie     Movie      @relation(fields: [movieId], references: [id])
+  screenId  String
+  screen    Screen     @relation(fields: [screenId], references: [id])
+  startTime DateTime
+  endTime   DateTime
+  language  String
+  format    String     @default("2D")
+  status    ShowStatus @default(UPCOMING)
+  createdAt DateTime   @default(now())
+
+  showSeats ShowSeat[]
+  bookings  Booking[]
+
+  @@index([movieId, startTime])
+  @@index([screenId, startTime])
+}
+
+model ShowSeat {
+  id          String     @id @default(cuid())
+  showId      String
+  show        Show       @relation(fields: [showId], references: [id])
+  seatId      String
+  seat        Seat       @relation(fields: [seatId], references: [id])
+  status      SeatStatus @default(AVAILABLE)
+  lockedUntil DateTime?
+  lockedBy    String?
+  version     Int        @default(0)
+
+  bookedSeat BookedSeat?
+
+  @@unique([showId, seatId])
+  @@index([showId, status])
+}
+
+model Booking {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id])
+  showId         String
+  show           Show          @relation(fields: [showId], references: [id])
+  status         BookingStatus @default(PENDING)
+  totalAmount    Decimal       @db.Decimal(10, 2)
+  idempotencyKey String        @unique
+  expiresAt      DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  bookedSeats BookedSeat[]
+  payments    Payment[]
+
+  @@index([userId])
+  @@index([userId, status])
+}
+
+model BookedSeat {
+  id             String   @id @default(cuid())
+  bookingId      String
+  booking        Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  showSeatId     String   @unique
+  showSeat       ShowSeat @relation(fields: [showSeatId], references: [id], onDelete: Cascade)
+  priceAtBooking Decimal  @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+
+  @@index([bookingId])
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  bookingId      String
+  booking        Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  provider       String
+  providerRef    String?       @unique
+  status         PaymentStatus @default(PENDING)
+  amount         Decimal       @db.Decimal(10, 2)
+  gatewayPayload Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([bookingId])
+}
