@@ -209,7 +209,7 @@ src
 ### 1️⃣ Clone the repository
 
 ```
-git clone https://github.com/yourusername/ticketblitz.git
+git clone https://github.com/Vishukaneki/ticketblitz.git
 cd ticketblitz
 ```
 
