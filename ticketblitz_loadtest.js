@@ -192,18 +192,6 @@ export function handleSummary(data) {
 ║    Win Rate           : ${(winPct + "%").padEnd(8)} (should be ~1%)           ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-📋 RESUME MEIN PASTE KAR YEH LINES:
---------------------------------------------------------------
-• Engineered Redis seat locking engine validated under 200 concurrent
-  users with ${p95Lock}ms p95 response time and 0 race conditions
-
-• Integrated Elasticsearch fuzzy search achieving ${p95Search}ms p95
-  response time across ${totalReqs} total requests at ${rps} req/s
-
-• Race condition test: 100 concurrent users contested a single seat —
-  exactly 1 lock granted, 0 duplicate bookings
---------------------------------------------------------------
-`;
 
   console.log(summary);
   return { stdout: summary };
