@@ -13,19 +13,12 @@ export const lockSeat = async (
 ) => {
   const lockKey = `seat_lock:${showId}:${seatId}`;
 
-  const acquired = await redisClient.setnx(lockKey, userId);
-
-  if (acquired === 0) {
-    return { success: false };
-  }
-
-
-  await redisClient.expire(lockKey, LOCK_DURATION_SECONDS);
-
+  // 1. DB first — if this fails, Redis never gets set, clean state
   try {
     await prisma.showSeat.update({
       where: {
         showId_seatId: { showId, seatId },
+        status: 'AVAILABLE', // only lock if currently available — optimistic check
       },
       data: {
         status: 'LOCKED',
@@ -34,9 +27,30 @@ export const lockSeat = async (
         version: { increment: 1 },
       },
     });
-  } catch (error) {
-    await redisClient.del(lockKey);
+  } catch (error: any) {
+    // P2025 — record not found, means seat is not AVAILABLE
+    if (error.code === 'P2025') {
+      return { success: false };
+    }
     throw new Error('Failed to update seat status in database');
+  }
+
+  // 2. Redis after DB succeeds — atomic set with expiry
+  const acquired = await redisClient.set(lockKey, userId, 'EX', LOCK_DURATION_SECONDS, 'NX');
+
+  if (!acquired) {
+    // Redis already has lock but DB just succeeded
+    // means same seat locked by someone else in Redis but DB was AVAILABLE — inconsistency
+    // roll back DB
+    await prisma.showSeat.update({
+      where: { showId_seatId: { showId, seatId } },
+      data: {
+        status: 'AVAILABLE',
+        lockedBy: null,
+        lockedUntil: null,
+      },
+    });
+    return { success: false };
   }
 
   return { success: true };
@@ -57,12 +71,11 @@ export const unlockSeat = async (showId: string, seatId: string) => {
 
   if (showSeat.status === 'BOOKED') {
     await redisClient.del(lockKey);
-    console.log(`--Seat ${seatId} is BOOKED — Redis cleaned, DB untouched`);
+    console.log(`Seat ${seatId} is BOOKED — Redis cleaned, DB untouched`);
     return;
   }
 
-  await redisClient.del(lockKey);
-
+  // DB first, then Redis — same principle
   await prisma.showSeat.update({
     where: { showId_seatId: { showId, seatId } },
     data: {
@@ -72,5 +85,7 @@ export const unlockSeat = async (showId: string, seatId: string) => {
     },
   });
 
-  console.log(`--Seat ${seatId} unlocked — now AVAILABLE`);
+  await redisClient.del(lockKey);
+
+  console.log(`Seat ${seatId} unlocked — now AVAILABLE`);
 };

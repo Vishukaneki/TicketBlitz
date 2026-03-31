@@ -2,12 +2,11 @@
 import { Request, Response } from 'express';
 import { confirmBookingTransaction } from '../services/booking.service';
 import { addTicketEmailJob } from '../jobs/notificationQueue';
-import {prisma} from '../config/prisma';
+import { confirmBookingSchema } from '../validators/booking.validator';
 
 export const confirmBooking = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { showId, seatIds, totalAmount, paymentRefId } = req.body;
-
+    // 1. Auth check first — fail fast
     if (!req.user) {
       res.status(401).json({ success: false, message: 'Unauthorized' });
       return;
@@ -15,44 +14,52 @@ export const confirmBooking = async (req: Request, res: Response): Promise<void>
 
     const userId = req.user.id;
 
-    if (!showId || !seatIds || !Array.isArray(seatIds) || seatIds.length === 0 || !totalAmount || !paymentRefId) {
-      res.status(400).json({ success: false, message: 'Missing required fields' });
+    // 2. Zod validation
+    const parsedData = confirmBookingSchema.safeParse(req.body);
+    if (!parsedData.success) {
+      res.status(400).json({ success: false, errors: parsedData.error.issues });
       return;
     }
 
-    const result = await confirmBookingTransaction(userId, showId, seatIds, totalAmount, paymentRefId);
+    const { showId, seatIds, paymentRefId } = parsedData.data;
 
-    if (result.success) {
-      try {
-        const user = await prisma.user.findUnique({
-          where: { id: userId },
-          select: { email: true }
-        });
+    // 3. All DB logic lives in service — returns everything we need
+    const result = await confirmBookingTransaction(userId, showId, seatIds, paymentRefId);
 
-        const targetEmail = user?.email ?? 'vishalnirnajan710@gmail.com';
+    if (!result.success) {
+      res.status(400).json({ success: false, message: result.message });
+      return;
+    }
 
+    // 4. Email notification — failure here must never affect booking response
+    try {
+      if (!result.userEmail) {
+        console.warn(`User ${userId} has no email — skipping email notification`);
+      } else {
         await addTicketEmailJob({
-          to: targetEmail,
+          to: result.userEmail,
           bookingDetails: {
-            movieTitle: "Batman: The Dark Knight",
+            movieTitle: result.movieTitle,  // comes from service, not hardcoded
             bookingId: result.booking?.id,
             seats: seatIds,
-            amount: totalAmount
+            amount: result.totalAmount      // calculated server side
           }
         });
-        console.log(` Email job dispatched for: ${targetEmail}`);
-      } catch (queueErr) {
-        console.error(' Queue error — booking is safe:', queueErr);
+        console.log(`Email job dispatched for: ${result.userEmail}`);
       }
-
-      res.status(200).json({
-        success: true,
-        message: 'Booking confirmed successfully!',
-        bookingId: result.booking?.id
-      });
-    } else {
-      res.status(400).json({ success: false, message: result.message });
+    } catch (queueErr) {
+      console.error('Queue error — booking is safe:', queueErr);
     }
+
+    // 5. Response
+    res.status(200).json({
+      success: true,
+      message: 'Booking confirmed successfully!',
+      data: {
+        bookingId: result.booking?.id,
+        totalAmount: result.totalAmount
+      }
+    });
 
   } catch (error) {
     console.error('Booking Controller Error:', error);

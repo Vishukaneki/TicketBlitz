@@ -24,18 +24,13 @@ export const signup = async (req: Request, res: Response): Promise<void> => {
     if (email) orConditions.push({ email });
     if (phone) orConditions.push({ phone });
 
-    // Edge case: if somehow neither email nor phone is provided
-    if (orConditions.length === 0) {
-      res.status(400).json({ success: false, message: 'Email or phone is required' });
-      return;
-    }
-
+    // removed the code as zod was there to validate this part 
     const existingUser = await prisma.user.findFirst({
       where: { OR: orConditions },
     });
 
     if (existingUser) {
-      res.status(409).json({
+      res.status(409).json({ 
         success: false,
         message: 'Email or Phone already registered',
       });
@@ -107,7 +102,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 
     // 5. Generate Tokens
     const accessToken = generateAccessToken(user.id, user.role);
-    const refreshToken = generateRefreshToken();
+    const refreshToken = generateRefreshToken(); // this a random hex string
 
     // 6. Save Refresh Token in DB — store the HASH, not the raw token.
     // If the DB is ever leaked, the hashes are useless to an attacker
@@ -123,16 +118,23 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       },
     });
 
-    // 7. Send Response
-    res.status(200).json({
-      success: true,
-      message: 'Login successful',
-      data: {
-        user: { id: user.id, email: user.email, role: user.role },
-        accessToken,
-        refreshToken, // raw token sent to client — they store it, we only store the hash
-      },
-    });
+    // 7. Send Response -- changes made here 30 march 2026 
+    res
+  .status(200)
+  .cookie('refreshToken', refreshToken, {
+    httpOnly: true,   // JS cannot access this cookie at all
+    secure: process.env.NODE_ENV === 'production',     // only sent over HTTPS
+    sameSite: 'strict', // not sent on cross-site requests
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days in ms
+  })
+  .json({
+    success: true,
+    data: {
+      user: { id: user.id, email: user.email, role: user.role },
+      accessToken  // short lived 15m — ok in body
+    }
+  });
+  // -- till here 
   } catch (error) {
     console.error('Login Error:', error);
     res.status(500).json({ success: false, message: 'Internal Server Error' });
@@ -142,37 +144,38 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 
 export const refreshAccessToken = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { refreshToken } = req.body;
+    // read from cookie not body
+    const refreshToken = req.cookies.refreshToken;
 
     if (!refreshToken) {
       res.status(401).json({ success: false, message: 'Refresh token is required' });
       return;
     }
 
-    // 1. Hash the incoming token to look it up in DB
     const hashedToken = hashToken(refreshToken);
 
-    // 2. Find the token record + join user data in one query
     const tokenRecord = await prisma.refreshToken.findUnique({
       where: { tokenHash: hashedToken },
       include: { user: true },
     });
 
-    // 3. Token doesn't exist at all — invalid or already deleted
     if (!tokenRecord) {
       res.status(403).json({ success: false, message: 'Invalid refresh token.' });
       return;
     }
 
-    // 4. HACKER ALERT — Token Theft Detection
-
     if (tokenRecord.isRevoked) {
-      console.warn(
-        `SECURITY ALERT: Revoked token reuse attempt for user ${tokenRecord.userId}`
-      );
+      console.warn(`SECURITY ALERT: Revoked token reuse attempt for user ${tokenRecord.userId}`);
 
       await prisma.refreshToken.deleteMany({
         where: { userId: tokenRecord.userId },
+      });
+
+      // clear cookie too — nuke everything
+      res.clearCookie('refreshToken', {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
       });
 
       res.status(403).json({
@@ -182,10 +185,15 @@ export const refreshAccessToken = async (req: Request, res: Response): Promise<v
       return;
     }
 
-    // 5. Expiry Check — token exists and is not revoked but has expired
     if (tokenRecord.expiresAt < new Date()) {
-      // Hard delete expired token — no point keeping it
       await prisma.refreshToken.delete({ where: { id: tokenRecord.id } });
+
+      res.clearCookie('refreshToken', {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+      });
+
       res.status(403).json({
         success: false,
         message: 'Refresh token expired. Please login again.',
@@ -193,36 +201,17 @@ export const refreshAccessToken = async (req: Request, res: Response): Promise<v
       return;
     }
 
-    // FIX: Verify the user still exists and is in good standing.
-
     if (!tokenRecord.user) {
-      res.status(403).json({ success: false, message: 'User account not found.' });
+      res.status(403).json({ success: false, message: 'Invalid refresh token.' });
       return;
     }
-    // i wont be needing this part system gets complex by a lot but it can be included if your data is good i m just lazy
 
-    // if (!tokenRecord.user.isVerified) {
-    //   res.status(403).json({
-    //     success: false,
-    //     message: 'Account is not verified. Please verify your account.',
-    //   });
-    //   return;
-    // }
-
-    // 6. FIX: Refresh Token Rotation
-
-
-    // Step A: Delete the old refresh token
+    // token rotation
     await prisma.refreshToken.delete({ where: { id: tokenRecord.id } });
 
-    // Step B: Generate fresh tokens
-    const newAccessToken = generateAccessToken(
-      tokenRecord.user.id,
-      tokenRecord.user.role
-    );
+    const newAccessToken = generateAccessToken(tokenRecord.user.id, tokenRecord.user.role);
     const newRefreshToken = generateRefreshToken();
 
-    // Step C: Save the new refresh token hash in DB
     const newExpiresAt = new Date();
     newExpiresAt.setDate(newExpiresAt.getDate() + 7);
 
@@ -234,15 +223,21 @@ export const refreshAccessToken = async (req: Request, res: Response): Promise<v
       },
     });
 
-    // 7. Return BOTH new tokens — client must replace their stored refresh token
-    res.status(200).json({
-      success: true,
-      message: 'Tokens refreshed successfully',
-      data: {
-        accessToken: newAccessToken,
-        refreshToken: newRefreshToken, // client MUST update this in storage
-      },
-    });
+    res
+      .status(200)
+      .cookie('refreshToken', newRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      })
+      .json({
+        success: true,
+        message: 'Tokens refreshed successfully',
+        data: {
+          accessToken: newAccessToken,
+        },
+      });
   } catch (error) {
     console.error('Refresh Token Error:', error);
     res.status(500).json({ success: false, message: 'Internal Server Error' });
@@ -252,7 +247,9 @@ export const refreshAccessToken = async (req: Request, res: Response): Promise<v
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { refreshToken } = req.body;
+    // read from cookie not body
+    const refreshToken = req.cookies.refreshToken;
+
     if (!refreshToken) {
       res.status(400).json({ success: false, message: 'Refresh token is required' });
       return;
@@ -267,17 +264,24 @@ export const logout = async (req: Request, res: Response): Promise<void> => {
       });
     } catch (e: any) {
       if (e.code === 'P2025') {
-        // Token not found — already logged out or invalid token.
-        // Return 200 anyway — idempotent logout is correct behavior.
-        res.status(200).json({
-          success: true,
-          message: 'Already logged out.',
+        // already logged out — clear cookie anyway and return 200
+        res.clearCookie('refreshToken', {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
         });
+        res.status(200).json({ success: true, message: 'Already logged out.' });
         return;
       }
-      // Any other DB error — rethrow so outer catch handles it
       throw e;
     }
+
+    // clear the cookie from client
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+    });
 
     res.status(200).json({
       success: true,
