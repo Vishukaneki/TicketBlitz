@@ -29,29 +29,44 @@ Redis --> SeatLocks[(Seat Locks)]
 ## Seat Lock / Unlock / Booking Flow Diagram
 ```mermaid
 sequenceDiagram
-participant User
-participant API
-participant Redis
-participant BullMQ
-participant Worker
-participant Postgres
-participant WebSocket
+    participant User
+    participant API
+    participant Postgres
+    participant Redis
+    participant BullMQ
+    participant Worker
+    participant WebSocket
 
-User->>API: POST /seats/lock
-API->>Redis: Create seat lock
-API->>BullMQ: Schedule unlock job
-API-->>User: Seats locked
+    User->>API: POST /seats/lock
 
-BullMQ->>Worker: Unlock job triggered
-Worker->>Redis: Remove lock
-Worker->>WebSocket: Broadcast seat available
+    API->>Postgres: Update ShowSeat (LOCKED, version++)
+    API->>Redis: SET seat_lock NX EX 600
+    API->>BullMQ: Schedule unlock job (10 min)
+    API-->>User: Seat locked (10 min timer)
 
-User->>API: POST /bookings/confirm
-API->>Postgres: Begin transaction
-API->>Postgres: Create booking
-API->>Redis: Delete seat lock
-API->>WebSocket: Broadcast BOOKED
-API-->>User: Booking confirmed
+    Note over BullMQ,Worker: If user does NOT pay...
+
+    BullMQ->>Worker: Trigger unlock job
+    Worker->>Postgres: Check seat status
+
+    alt Seat already BOOKED
+        Worker->>Redis: Delete lock (cleanup)
+    else Seat still LOCKED
+        Worker->>Postgres: Update → AVAILABLE
+        Worker->>Redis: Delete lock
+        Worker->>WebSocket: Broadcast seat_unlocked
+    end
+
+    User->>API: POST /bookings/confirm
+
+    API->>Postgres: Begin transaction
+    API->>Postgres: Verify lock ownership
+    API->>Postgres: Calculate price
+    API->>Postgres: Create Booking + Payment
+    API->>Postgres: Update seat → BOOKED
+    API->>Redis: Delete lock
+    API->>WebSocket: Broadcast seats_booked
+    API-->>User: Booking confirmed 🎟️
 ```
 ---
 # ✨ Key Features
