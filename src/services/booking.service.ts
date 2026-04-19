@@ -8,66 +8,97 @@ export const confirmBookingTransaction = async (
   userId: string,
   showId: string,
   seatIds: string[],
-  totalAmount: number,
   paymentRefId: string
 ) => {
   try {
-    const transactionResult = await prisma.$transaction(async (tx) => {
+    const { booking: transactionResult, totalAmount, userEmail, movieTitle } =
+      await prisma.$transaction(async (tx) => {
 
-      const showSeats = await tx.showSeat.findMany({
-        where: { showId, seatId: { in: seatIds } },
-        include: { seat: true }
-      });
-
-      if (showSeats.length !== seatIds.length) {
-        throw new Error('Some seats are invalid or not found.');
-      }
-
-      const invalidSeats = showSeats.filter(
-        ss => ss.status !== 'LOCKED' || ss.lockedBy !== userId
-      );
-      if (invalidSeats.length > 0) {
-        throw new Error('One or more seats are not locked by you.');
-      }
-
-      const booking = await tx.booking.create({
-        data: {
-          userId,
-          showId,
-          status: 'CONFIRMED',
-          totalAmount,
-          idempotencyKey: paymentRefId,
-          expiresAt: null, 
-        }
-      });
-
-      for (const ss of showSeats) {
-        await tx.showSeat.update({
-          where: { id: ss.id },
-          data: { status: 'BOOKED', lockedBy: null, lockedUntil: null }
+        // Fetch user email for the notification
+        const user = await tx.user.findUnique({
+          where: { id: userId },
+          select: { email: true },
         });
 
-        await tx.bookedSeat.create({
+        if (!user) {
+          throw new Error('User not found for booking.');
+        }
+
+        // Fetch show with movie title for the notification
+        const show = await tx.show.findUnique({
+          where: { id: showId },
+          include: { movie: { select: { title: true } } },
+        });
+
+        if (!show) {
+          throw new Error('Show not found for booking.');
+        }
+
+        const showSeats = await tx.showSeat.findMany({
+          where: { showId, seatId: { in: seatIds } },
+          include: { seat: true }
+        });
+
+        if (showSeats.length !== seatIds.length) {
+          throw new Error('Some seats are invalid or not found.');
+        }
+
+        const invalidSeats = showSeats.filter(
+          ss => ss.status !== 'LOCKED' || ss.lockedBy !== userId
+        );
+        if (invalidSeats.length > 0) {
+          throw new Error('One or more seats are not locked by you.');
+        }
+
+        // Calculate total amount server-side from actual seat prices
+        const computedTotal = showSeats.reduce(
+          (sum, ss) => sum + Number(ss.seat.basePrice),
+          0
+        );
+
+        const booking = await tx.booking.create({
           data: {
-            bookingId: booking.id,
-            showSeatId: ss.id,
-            priceAtBooking: ss.seat.basePrice
+            userId,
+            showId,
+            status: 'CONFIRMED',
+            totalAmount: computedTotal,
+            idempotencyKey: paymentRefId,
+            expiresAt: null,
           }
         });
-      }
 
-      await tx.payment.create({
-        data: {
-          bookingId: booking.id,
-          provider: 'MOCK_GATEWAY',
-          providerRef: paymentRefId,
-          status: 'SUCCESS',
-          amount: totalAmount
+        for (const ss of showSeats) {
+          await tx.showSeat.update({
+            where: { id: ss.id },
+            data: { status: 'BOOKED', lockedBy: null, lockedUntil: null }
+          });
+
+          await tx.bookedSeat.create({
+            data: {
+              bookingId: booking.id,
+              showSeatId: ss.id,
+              priceAtBooking: ss.seat.basePrice
+            }
+          });
         }
-      });
 
-      return booking;
-    });
+        await tx.payment.create({
+          data: {
+            bookingId: booking.id,
+            provider: 'MOCK_GATEWAY',
+            providerRef: paymentRefId,
+            status: 'SUCCESS',
+            amount: computedTotal
+          }
+        });
+
+        return {
+          booking,
+          totalAmount: computedTotal,
+          userEmail: user.email ?? null,
+          movieTitle: show.movie?.title ?? null,
+        };
+      });
 
     for (const seatId of seatIds) {
       const lockKey = `seat_lock:${showId}:${seatId}`;
@@ -84,7 +115,7 @@ export const confirmBookingTransaction = async (
     const io = getIO();
     io.to(`show_${showId}`).emit('seats_booked_permanently', { seatIds, status: 'BOOKED' });
 
-    return { success: true, booking: transactionResult };
+    return { success: true, booking: transactionResult, totalAmount, userEmail, movieTitle };
 
   } catch (error: any) {
     console.error('--Transaction Failed:', error);

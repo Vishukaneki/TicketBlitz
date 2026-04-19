@@ -4,6 +4,7 @@ import { createServer } from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import cookieParser from 'cookie-parser';
 import 'dotenv/config';
 import dotenv from 'dotenv';
 
@@ -42,6 +43,9 @@ app.use(cors());
 
 // express.json — parse incoming JSON request bodies
 app.use(express.json());
+
+// cookie-parser — parse Cookie header so req.cookies is populated
+app.use(cookieParser());
 
 // morgan — HTTP request logger (dev format: method, url, status, response time)
 app.use(morgan('dev'));
