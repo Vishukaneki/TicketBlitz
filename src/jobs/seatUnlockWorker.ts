@@ -1,28 +1,32 @@
 // src/jobs/seatUnlockWorker.ts
 import { Worker, Job } from 'bullmq';
 import { bullMqConnection } from '../config/redis';
-import { unlockSeat } from '../services/seat.service';
+import { releaseExpiredSeatsForBroadcast } from '../services/lock.service';
+import { SeatUnlockBatchPayload } from './seatUnlockQueue';
 import { broadcastToShow } from '../sockets';
 
 export const initSeatUnlockWorker = (): Worker => {
-  const worker = new Worker(
+  const worker = new Worker<SeatUnlockBatchPayload>(
     'seat-unlock-queue',
-    async (job: Job) => {
-      const { showId, seatId } = job.data;
+    async (job: Job<SeatUnlockBatchPayload>) => {
+      const { showId, seatIds, lockToken } = job.data;
 
-      await unlockSeat(showId, seatId);
+      // Redis handles key expiry via TTL; worker checks which seats are genuinely free
+      // (unbooked & not re-locked by a newer session) without touching PostgreSQL.
+      const unlockedSeats = await releaseExpiredSeatsForBroadcast(showId, seatIds, lockToken);
 
-      // Broadcast across all pods via Redis
-      broadcastToShow(showId, 'seat_unlocked', {
-        seatId,
-        status: 'AVAILABLE',
-      });
+      if (unlockedSeats.length > 0) {
+        broadcastToShow(showId, 'seat_unlocked', {
+          seatIds: unlockedSeats,
+          status: 'AVAILABLE',
+        });
+      }
     },
     { connection: bullMqConnection }
   );
 
   worker.on('completed', (job) => {
-    console.log(`--Auto-unlock complete for seat ${job.data.seatId}`);
+    console.log(`--Batch unlock check complete for job ${job.id}`);
   });
 
   worker.on('failed', (job, err) => {

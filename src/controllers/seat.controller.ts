@@ -1,69 +1,105 @@
 // src/controllers/seat.controller.ts
 import { Request, Response } from 'express';
-import { lockSeat, unlockSeat } from '../services/seat.service';
-import { scheduleSeatUnlock } from '../jobs/seatUnlockQueue';
-import { getIO } from '../sockets';
+import { lockSeats, releaseSeats } from '../services/seat.service';
+import { lockSeatsSchema, releaseSeatsSchema } from '../validators/seat.validator';
 
 export const selectSeat = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { showId, seatIds } = req.body;
-
-    // Input validation
-    if (!showId || !Array.isArray(seatIds) || seatIds.length === 0) {
-      res.status(400).json({
-        success: false,
-        message: 'showId and seatIds (non-empty array) are required',
-      });
-      return;
-    }
-
     const userId = req.user?.id;
     if (!userId) {
       res.status(401).json({ success: false, message: 'Unauthorized' });
       return;
     }
 
-    const lockedSeatIds: string[] = [];
+    const parsed = lockSeatsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        errors: parsed.error.issues,
+      });
+      return;
+    }
 
-    for (const seatId of seatIds) {
-      const lockResult = await lockSeat(showId, seatId, userId);
+    const { showId, seatIds } = parsed.data;
 
-      if (lockResult.success) {
-        lockedSeatIds.push(seatId);
-      } else {
-        // Roll back any seats already locked in this request
-        for (const alreadyLocked of lockedSeatIds) {
-          try {
-            await unlockSeat(showId, alreadyLocked);
-          } catch (rollbackErr) {
-            console.error(`Rollback failed for seat ${alreadyLocked}:`, rollbackErr);
-          }
-        }
+    const lockResult = await lockSeats(showId, seatIds, userId);
 
-        res.status(409).json({
+    if (!lockResult.success) {
+      if (lockResult.conflictReason === 'SHOW_NOT_FOUND') {
+        res.status(404).json({
           success: false,
-          message: `Seat ${seatId} is already taken. No seats were locked.`,
+          message: 'Show not found or has no configured seats.',
         });
         return;
       }
-    }
 
-    const io = getIO();
-    io.to(`show_${showId}`).emit('seat_locked', {
-      seatIds: lockedSeatIds,
-      status: 'LOCKED',
-    });
+      if (lockResult.conflictReason === 'INVALID_SEAT') {
+        res.status(400).json({
+          success: false,
+          message: `Seat ${lockResult.conflictingSeatId} is not valid for this show.`,
+        });
+        return;
+      }
 
-    for (const seatId of lockedSeatIds) {
-      await scheduleSeatUnlock(showId, seatId, userId);
+      res.status(409).json({
+        success: false,
+        message: `Seat ${lockResult.conflictingSeatId} is already ${lockResult.conflictReason?.toLowerCase() ?? 'taken'}. No seats were locked.`,
+      });
+      return;
     }
 
     res.status(200).json({
       success: true,
       message: 'Seats locked for 10 minutes. Please complete payment.',
+      data: {
+        showId,
+        seatIds,
+        lockToken: lockResult.lockToken,
+        expiresInSeconds: lockResult.expiresInSeconds,
+      },
     });
   } catch (error) {
     console.error('Seat Lock Error:', error);
+    res.status(500).json({ success: false, message: 'Internal Server Error' });
+  }
+};
+
+export const releaseSeat = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+
+    const parsed = releaseSeatsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        errors: parsed.error.issues,
+      });
+      return;
+    }
+
+    const { showId, seatIds, lockToken } = parsed.data;
+
+    if (!lockToken.startsWith(`${userId}:`)) {
+      res.status(403).json({
+        success: false,
+        message: 'Forbidden: Lock token does not belong to you.',
+      });
+      return;
+    }
+
+    const releasedCount = await releaseSeats(showId, seatIds, lockToken);
+
+    res.status(200).json({
+      success: true,
+      message: releasedCount > 0 ? 'Seats released.' : 'No matching active locks found to release.',
+      data: { releasedCount },
+    });
+  } catch (error) {
+    console.error('Seat Release Error:', error);
     res.status(500).json({ success: false, message: 'Internal Server Error' });
   }
 };

@@ -273,7 +273,7 @@ gantt
   4. Decoupled processes into `src/server.ts` (API + WebSockets) and `src/worker.ts` (BullMQ workers).
   5. Implemented `/health/live`, cached `/health/ready` (Postgres & Redis critical, ES graceful degradation), and 5s LB-deregistration graceful shutdown on `SIGTERM`/`SIGINT`.
 
-### Phase 2: In-Memory Locking Engine (Redis Lua) 🔜 *(Ready — [Detailed Docs](./Phase-2/README.md))*
+### Phase 2: In-Memory Locking Engine (Redis Lua) ✅ *(Completed — [Detailed Docs](./Phase-2/README.md))*
 - **Goal:** Sub-5ms atomic seat lock operations; zero PostgreSQL writes during seat selection, zero double-bookings under crash/drift.
 - **Action Items:**
   1. Create `src/validators/seat.validator.ts` with Zod validation (CUIDs, max 10 seats cap, deduplication preventing `["A1", "A1"]` self-sabotage).
@@ -417,9 +417,9 @@ Track implementation progress as TicketBlitz levels up:
 - [x] Add PgBouncer to `docker-compose.yml` in transaction pooling mode (Phase 1)
 - [x] Add `@socket.io/redis-adapter` for multi-instance WebSocket sync (Phase 1)
 - [x] Separate server into `server.ts` (API/WS) and `worker.ts` (BullMQ) (Phase 1)
-- [ ] Implement atomic Redis Lua script for multi-seat reservation (Phase 2)
-- [ ] Decouple seat locking from direct PostgreSQL writes (Phase 2)
-- [ ] Refactor `booking.service.ts` to use batch updates (`updateMany`, `createMany`) (Phase 2)
+- [x] Implement atomic Redis Lua script for multi-seat reservation (Phase 2)
+- [x] Decouple seat locking from direct PostgreSQL writes (Phase 2)
+- [x] Refactor `booking.service.ts` to use batch updates (`updateMany`, `createMany`) (Phase 2)
 - [ ] Implement Transactional Outbox pattern for post-booking events (Phase 3)
 
 ### Reliability & Observability

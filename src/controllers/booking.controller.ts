@@ -14,20 +14,29 @@ export const confirmBooking = async (req: Request, res: Response): Promise<void>
 
     const userId = req.user.id;
 
-    // 2. Zod validation
+    // 2. Zod validation (includes deduplication & max seat limit)
     const parsedData = confirmBookingSchema.safeParse(req.body);
     if (!parsedData.success) {
       res.status(400).json({ success: false, errors: parsedData.error.issues });
       return;
     }
 
-    const { showId, seatIds, paymentRefId } = parsedData.data;
+    const { showId, seatIds, paymentRefId, lockToken } = parsedData.data;
 
-    // 3. All DB logic lives in service — returns everything we need
-    const result = await confirmBookingTransaction(userId, showId, seatIds, paymentRefId);
+    // 3. Redis lock verification + Batch ACID transaction
+    const result = await confirmBookingTransaction(
+      userId,
+      showId,
+      seatIds,
+      paymentRefId,
+      lockToken
+    );
 
     if (!result.success) {
-      res.status(400).json({ success: false, message: result.message });
+      res.status(result.statusCode || 400).json({
+        success: false,
+        message: result.message,
+      });
       return;
     }
 
@@ -39,11 +48,11 @@ export const confirmBooking = async (req: Request, res: Response): Promise<void>
         await addTicketEmailJob({
           to: result.userEmail,
           bookingDetails: {
-            movieTitle: result.movieTitle,  // comes from service, not hardcoded
+            movieTitle: result.movieTitle,
             bookingId: result.booking?.id,
             seats: seatIds,
-            amount: result.totalAmount      // calculated server side
-          }
+            amount: result.totalAmount,
+          },
         });
         console.log(`Email job dispatched for: ${result.userEmail}`);
       }
@@ -57,10 +66,9 @@ export const confirmBooking = async (req: Request, res: Response): Promise<void>
       message: 'Booking confirmed successfully!',
       data: {
         bookingId: result.booking?.id,
-        totalAmount: result.totalAmount
-      }
+        totalAmount: result.totalAmount,
+      },
     });
-
   } catch (error) {
     console.error('Booking Controller Error:', error);
     res.status(500).json({ success: false, message: 'Internal Server Error' });
