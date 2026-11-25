@@ -37,7 +37,7 @@
    - [Step 3: Horizontal Socket.IO with Redis Adapter & Tunings](#step-3-horizontal-socketio-with-redis-adapter--tunings)
    - [Step 4: Process Decoupling (`server.ts` vs. `worker.ts`)](#step-4-process-decoupling-serverts-vs-workerts)
    - [Step 5: Cloud-Native Health Probes with Caching & Proper Shutdown Order](#step-5-cloud-native-health-probes-with-caching--proper-shutdown-order)
-7. [Verification & File Inventory](#7-verification--file-inventory)
+7. [Verification Checklist](#7-verification-checklist)
 
 ---
 
@@ -132,7 +132,7 @@ While MySQL uses one OS thread per connection instead of a full process fork, it
 ---
 
 ### The `directUrl` Migration Conflict & `?pgbouncer=true`
-In [prisma/schema.prisma](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/prisma/schema.prisma):
+In `prisma/schema.prisma`:
 ```prisma
 datasource db {
   provider  = "postgresql"
@@ -187,7 +187,7 @@ Because workers run in a separate process (`worker.ts`) without an HTTP or Socke
 - How does it broadcast `seat_unlocked`?
 - **The Solution:** `@socket.io/redis-emitter`. The worker writes directly into Redis Pub/Sub, which routes the message to the API pods holding active user sockets.
 
-In [src/sockets/index.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/sockets/index.ts):
+In `src/sockets/index.ts`:
 ```typescript
 export const broadcastToShow = (showId: string, event: string, data: any): void => {
   try {
@@ -230,7 +230,7 @@ Redis standard Pub/Sub has **zero persistence or message buffering**.
 
 ## 5. Deep Dive 4: WebSocket Production Tunings & DoS Hardening
 
-In [src/sockets/index.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/sockets/index.ts#L22-L28):
+In `src/sockets/index.ts`:
 
 ```typescript
   io = new Server(server, {
@@ -265,12 +265,12 @@ In [src/sockets/index.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/
 ## 6. Step-by-Step Implementation & Architecture
 
 ### Step 1: Global Prisma Client Singleton
-- Bound Prisma to `globalThis` in [src/config/prisma.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/config/prisma.ts).
+- Bound Prisma to `globalThis` in `src/config/prisma.ts`.
 - Refactored `seat.service.ts`, `auth.controller.ts`, `sync.ts`, and `seed.ts` to import the shared singleton.
 
 ### Step 2: PgBouncer Integration in Docker Compose
-- Added `pgbouncer` service to [docker-compose.yml](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/docker-compose.yml) on port `6432` in transaction pooling mode.
-- Configured [prisma/schema.prisma](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/prisma/schema.prisma) with `directUrl` for migrations on port `5432`.
+- Added `pgbouncer` service to `docker-compose.yml` on port `6432` in transaction pooling mode.
+- Configured `prisma/schema.prisma` with `directUrl` for migrations on port `5432`.
 - Included `?pgbouncer=true` in `DATABASE_URL` to disable named prepared statements.
 
 ### Step 3: Horizontal Socket.IO with Redis Adapter & Tunings
@@ -278,11 +278,11 @@ In [src/sockets/index.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/
 - Hardened buffer size (4 KB), enforced WebSockets transport, and implemented `broadcastToShow()`.
 
 ### Step 4: Process Decoupling (`server.ts` vs. `worker.ts`)
-- Created [src/server.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/server.ts) for HTTP/WebSockets.
-- Created [src/worker.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/worker.ts) for BullMQ background workers.
+- Created `src/server.ts` for HTTP/WebSockets.
+- Created `src/worker.ts` for BullMQ background workers.
 
 ### Step 5: Cloud-Native Health Probes with Caching & Proper Shutdown Order
-In [src/server.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/server.ts):
+In `src/server.ts`:
 1. **Critical vs. Non-Critical Readiness:**
    - **PostgreSQL & Redis:** Critical dependencies. If either is down, `/health/ready` returns `503 Service Unavailable`.
    - **Elasticsearch:** Auxiliary read dependency. If Elasticsearch fails, the check is marked `DEGRADED`, but the pod remains ready so ticket checkout continues functioning.
@@ -307,33 +307,13 @@ In [src/server.ts](file:///Users/mac/Desktop/TicketBlitz/TicketBlitz/src/server.
 
 ---
 
-## 7. Verification & File Inventory
+## 7. Verification Checklist
 
-### Verification Checklist
 - [x] `npx tsc --noEmit` exits with **code 0** (0 type errors).
 - [x] `npm run build` cleanly outputs `dist/server.js`, `dist/worker.js`, etc.
 - [x] Exactly 1 `new PrismaClient` exists across the repository.
 - [x] Socket.IO configured with 4 KB buffer, pure WebSockets, and Redis pub/sub adapter.
-- [x] Multi-stage shutdown and probe caching implemented in `src/server.ts`.
-
-### File Modification Inventory
-| File | Action | Details |
-| :--- | :--- | :--- |
-| `src/config/prisma.ts` | Modified | Lines 1–14 (Global singleton) |
-| `src/services/seat.service.ts` | Modified | Lines 1–4 (Import shared prisma) |
-| `src/controllers/auth.controller.ts` | Modified | Lines 1–8 (Import shared prisma) |
-| `src/sync.ts` | Modified | Lines 1–5 (Import shared prisma) |
-| `src/seed.ts` | Modified | Lines 1–3 (Import shared prisma) |
-| `prisma/schema.prisma` | Modified | Lines 5–9 (Added directUrl) |
-| `docker-compose.yml` | Modified | Lines 20–40 (PgBouncer service) |
-| `package.json` | Modified | Lines 7–13, 19–20 (Decoupled scripts & packages) |
-| `src/sockets/index.ts` | Modified | Lines 1–80 (Redis adapter, 4 KB buffer, Emitter) |
-| `src/jobs/seatUnlockWorker.ts` | Modified | Lines 7–33 (Universal broadcast & worker return) |
-| `src/jobs/notificationWorker.ts` | Modified | Lines 6–24 (Worker return for graceful shutdown) |
-| `src/index.ts` | Modified | Lines 1–3 (Re-export server) |
-| `src/server.ts` | **NEW** | Lines 1–180 (Dedicated API server with probe caching & shutdown delay) |
-| `src/worker.ts` | **NEW** | Lines 1–64 (Dedicated worker runner) |
-| `.env.example` | **NEW** | Lines 1–26 (PgBouncer vs Direct URLs) |
+- [x] Multi-stage shutdown and readiness probe caching implemented in `src/server.ts`.
 
 ---
 *Maintained with pride by the TicketBlitz Engineering Team. Built to scale.*

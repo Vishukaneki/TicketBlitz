@@ -6,7 +6,7 @@
 ---
 
 ## 📑 Table of Contents
-1. [The 5 Critical Flaws in v1.0 (Exact Code Audit)](#1-the-5-critical-flaws-in-v10-exact-code-audit)
+1. [The 5 Critical Flaws in v1.0 (Architecture Audit)](#1-the-5-critical-flaws-in-v10-architecture-audit)
    - [Flaw 1: DB-First Lock Contention & Split-State Rollback Race](#flaw-1-db-first-lock-contention--split-state-rollback-race)
    - [Flaw 2: Non-Atomic Multi-Seat Loop & AB-BA Deadlocks](#flaw-2-non-atomic-multi-seat-loop--ab-ba-deadlocks)
    - [Flaw 3: Missing Zod Guardrails & Duplicate Seat Self-Sabotage](#flaw-3-missing-zod-guardrails--duplicate-seat-self-sabotage)
@@ -29,28 +29,28 @@
    - [Why Sequential Queries Inside Transactions Kill PgBouncer Throughput](#why-sequential-queries-inside-transactions-kill-pgbouncer-throughput)
    - [Batch `updateMany` + `createMany` Blueprint](#batch-updatemany--createmany-blueprint)
    - [Batch BullMQ Expiry Notifications](#batch-bullmq-expiry-notifications)
-6. [Phase 2 Engineering Plan & File Inventory](#6-phase-2-engineering-plan--file-inventory)
+6. [Phase 2 Component Architecture](#6-phase-2-component-architecture)
 7. [Verification & Acceptance Criteria](#7-verification--acceptance-criteria)
 
 ---
 
-## 1. The 5 Critical Flaws in v1.0 (Exact Code Audit)
+## 1. The 5 Critical Flaws in v1.0 (Architecture Audit)
 
-Before writing a line of Phase 2 code, we audited the exact locking and booking paths in `src/services/seat.service.ts`, `src/controllers/seat.controller.ts`, and `src/services/booking.service.ts`.
+Before implementing Phase 2, we audited the locking and booking paths across the seat service, seat controller, and booking service.
 
 ### Flaw 1: DB-First Lock Contention & Split-State Rollback Race
-In `src/services/seat.service.ts` (Lines 15–53):
+In the original `lockSeat()` flow (`src/services/seat.service.ts`):
 1. `lockSeat()` executes `prisma.showSeat.update({ where: { showId_seatId, status: 'AVAILABLE' }, ... })` **first**, hitting PostgreSQL directly.
 2. Only after Postgres commits does it run `redisClient.set(lockKey, userId, 'EX', 600, 'NX')`.
 
 **Why this breaks under load:**
 - If 5,000 fans click Seat `A1` during a flash sale, **all 5,000 requests slam PostgreSQL first**. Postgres serializes all 5,000 connections behind an exclusive row lock on `ShowSeat`. Request #1 wins; the remaining 4,999 wait on the row lock and fail with Prisma error `P2025`. Redis is supposed to shield Postgres—not sit behind it.
-- **Hidden Race Window in `unlockSeat()` (Lines 77–86):** `unlockSeat()` resets Postgres `status = 'AVAILABLE'` **first** (Line 77) and deletes the Redis key **second** (Line 86). During the milliseconds between those two network calls, `lockSeat()` can succeed in Postgres, hit `redisClient.set(..., 'NX')`, get `null` (because the old Redis key isn't deleted yet), enter `if (!acquired)` (Line 39), and roll Postgres back to `'AVAILABLE'`!
+- **Hidden Race Window in `unlockSeat()`:** `unlockSeat()` resets Postgres `status = 'AVAILABLE'` **first** and deletes the Redis key **second**. During the milliseconds between those two network calls, `lockSeat()` can succeed in Postgres, hit `redisClient.set(..., 'NX')`, get `null` (because the old Redis key isn't deleted yet), enter `if (!acquired)`, and roll Postgres back to `'AVAILABLE'`!
 
 ---
 
 ### Flaw 2: Non-Atomic Multi-Seat Loop & AB-BA Deadlocks
-In `src/controllers/seat.controller.ts` (Lines 28–49):
+In the original `selectSeat()` controller (`src/controllers/seat.controller.ts`):
 ```typescript
 for (const seatId of seatIds) {
   const lockResult = await lockSeat(showId, seatId, userId);
@@ -68,8 +68,8 @@ for (const seatId of seatIds) {
 ---
 
 ### Flaw 3: Missing Zod Guardrails & Duplicate Seat Self-Sabotage
-In `src/controllers/seat.controller.ts` (Lines 12–18):
-- Unlike `booking.controller.ts`, `seat.controller.ts` performs no Zod schema validation, sets no max seat cap (an attacker/bot can send 300 seat IDs in one call and lock an entire theater), and performs **no deduplication**.
+In the original `selectSeat()` handler (`src/controllers/seat.controller.ts`):
+- Unlike `confirmBooking`, seat locking performed no Zod schema validation, enforced no max seat cap (allowing a bot to send 300 seat IDs in one call and lock an entire theater), and performed **no deduplication**.
 - **Duplicate Self-Sabotage:** If a request sends `seatIds: ["A1", "A1"]` when `A1` is free:
   1. Iteration 1 locks `A1` and pushes `"A1"` into `lockedSeatIds`.
   2. Iteration 2 tries to lock `"A1"` again, fails because Iteration 1 locked it 2ms ago, and triggers the rollback loop—unlocking `A1` and returning `409 Conflict` to the user who just locked it!
@@ -77,17 +77,17 @@ In `src/controllers/seat.controller.ts` (Lines 12–18):
 ---
 
 ### Flaw 4: Orphaned Locks & Blind Unlocks
-1. **Orphaned Permanent Locks (`seat.controller.ts` Lines 51–59):**
-   The controller locks seats in Postgres, emits Socket.IO via `getIO()` (bypassing `broadcastToShow()`), and *lastly* schedules the BullMQ unlock job.
+1. **Orphaned Permanent Locks:**
+   The controller locked seats in Postgres, emitted Socket.IO via `getIO()` (bypassing `broadcastToShow()`), and *lastly* scheduled the BullMQ unlock job.
    - Because Postgres rows do not expire automatically, **if the pod crashes (`SIGKILL` / OOM kill) between locking and scheduling BullMQ**, no rollback runs and no unlock job exists. That seat stays `LOCKED` in PostgreSQL **forever**.
    - Postgres and Redis cannot participate in a single cross-database ACID transaction to prevent this.
-2. **Blind Unlocks (`seat.service.ts` Lines 57–88):**
-   `unlockSeat()` blindly calls `redisClient.del(lockKey)` and resets Postgres to `AVAILABLE` without checking *who* owns the lock. If a lock expired 1ms earlier and another user already re-locked the seat, the delayed cleanup wipes out the new user's valid lock.
+2. **Blind Unlocks:**
+   `unlockSeat()` blindly called `redisClient.del(lockKey)` and reset Postgres to `AVAILABLE` without checking *who* owns the lock. If a lock expired 1ms earlier and another user already re-locked the seat, the delayed cleanup wiped out the new user's valid lock.
 
 ---
 
 ### Flaw 5: 2N Sequential Queries Inside an Open Transaction
-In `src/services/booking.service.ts` (Lines 70–83):
+In `confirmBookingTransaction()` (`src/services/booking.service.ts`):
 ```typescript
 for (const ss of showSeats) {
   await tx.showSeat.update({ ... });   // Sequential query 1
@@ -330,14 +330,14 @@ WHERE "showId" = $1 AND "seatId" IN ('A1', 'A2') AND status = 'AVAILABLE';
 - **Partial Conflict:** Rudra requests `["A1", "A2"]` when `A1` is free and `A2` is already `BOOKED`. Postgres updates only `A1` (`count = 1`). Since `1 !== 2`, `throw new Error(...)` causes Postgres to **automatically roll back `A1` to `'AVAILABLE'`**.
 
 #### 2. Schema-Level Padlock (`BookedSeat.showSeatId @unique`)
-In `prisma/schema.prisma` (Line 215), `BookedSeat.showSeatId` has a **`@unique` database index**. Even if application code omitted the `updateMany` check, PostgreSQL's storage engine throws `P2002` (Unique Constraint Violation) if a second booking ever tries to insert a `BookedSeat` for an already booked `ShowSeat`.
+In `prisma/schema.prisma`, `BookedSeat.showSeatId` has a **`@unique` database index**. Even if application code omitted the `updateMany` check, PostgreSQL's storage engine throws `P2002` (Unique Constraint Violation) if a second booking ever tries to insert a `BookedSeat` for an already booked `ShowSeat`.
 
 ---
 
 ## 5. Deep Dive 3: Batching Database Writes (2N to 2 Queries)
 
 ### Why Sequential Queries Inside Transactions Kill PgBouncer Throughput
-In `src/services/booking.service.ts` (Lines 70–83), `await` inside `for (const ss of showSeats)` forces Node.js to execute **20 sequential network round-trips** for a 10-seat booking before calling `COMMIT`.
+In the original `confirmBookingTransaction()` (`src/services/booking.service.ts`), `await` inside `for (const ss of showSeats)` forced Node.js to execute **20 sequential network round-trips** for a 10-seat booking before calling `COMMIT`.
 - PgBouncer in `POOL_MODE=transaction` **cannot release the real Postgres backend process until `COMMIT` finishes**.
 - Holding a transaction open across 20 sequential network hops dramatically cuts transaction throughput.
 
@@ -350,25 +350,24 @@ Replacing the imperative loop with two batch operations:
 ---
 
 ### Batch BullMQ Expiry Notifications
-Instead of enqueueing $N$ separate BullMQ jobs inside a loop (`seat.controller.ts` Lines 57–59):
+Instead of enqueueing $N$ separate BullMQ jobs inside a loop:
 - Enqueue **1 single batch delayed job** (`{ showId, seatIds, lockToken }`) scheduled for 10 minutes (`600,000 ms`).
-- When the 10-minute timer fires in `seatUnlockWorker.ts`:
+- When the 10-minute timer fires in `seatUnlockWorker`:
   - Because Redis already expired the temporary lock keys via TTL, the worker **does not need to write to PostgreSQL**.
   - It simply checks which of those `seatIds` are NOT in `show_booked:{showId}` and NOT re-locked by a newer `lockToken`, and broadcasts `seat_unlocked` via `broadcastToShow()`!
-- When a booking confirms early (`confirmBookingTransaction`), it deletes the single batch BullMQ job via `job.remove()`.
+- When a booking confirms early (`confirmBookingTransaction`), it removes the single batch BullMQ job only if all seats in that batch were confirmed.
 
 ---
 
-## 6. Phase 2 Engineering Plan & File Inventory
+## 6. Phase 2 Component Architecture
 
-| Step | Target File | Planned Changes |
-| :--- | :--- | :--- |
-| **1** | `src/validators/seat.validator.ts` *(NEW)* | Zod schema for `lockSeatsSchema`: CUID checks, `min(1)`, `max(10)` seat limit (anti-bot), and `Array.from(new Set(seatIds))` deduplication. |
-| **2** | `src/services/lock.service.ts` *(NEW)* | Redis Lua engine: `{showId}` hash tags, lazy `show_booked` hydration with `show_hydrated` sentinel, `acquireMultiSeatLock()`, `releaseMultiSeatLock()`, `verifyLockOwnership()`, `markSeatsBooked()`. |
-| **3** | `src/services/seat.service.ts` *(REFACTOR)* | Remove DB-first lock updates (`prisma.showSeat.update`). Delegate locking/unlocking cleanly to `lock.service.ts`. |
-| **4** | `src/controllers/seat.controller.ts` *(REFACTOR)* | Parse with `lockSeatsSchema`, call atomic `lockService`, schedule 1 batch BullMQ expiry-notify job, emit via `broadcastToShow()`. |
-| **5** | `src/services/booking.service.ts` *(REFACTOR)* | Verify Redis locks, replace `ss.status !== 'LOCKED'` check with atomic `updateMany(..., status: 'AVAILABLE')` + `updated.count === seatIds.length`, use `bookedSeat.createMany()`, self-heal Redis cache on `BOOKED` drift, update Redis `show_booked` + delete locks, cancel batch unlock job, emit via `broadcastToShow()`. |
-| **6** | `src/jobs/seatUnlockQueue.ts` & `seatUnlockWorker.ts` *(REFACTOR)* | Switch to single batch job per reservation (`batchId` / `lockToken`). Worker checks Redis state without writing Postgres and broadcasts `seat_unlocked` via `broadcastToShow()`. |
+| Component | Architectural Responsibility |
+| :--- | :--- |
+| **Seat Validators** (`seat.validator.ts`) | Zod validation enforcing CUIDs, max 10 seats per booking (anti-bot), and `Set` deduplication. |
+| **Lua Lock Engine** (`lock.service.ts`) | `{showId}` Redis Cluster hash tags, single-flight lazy cache hydration (`show_hydrated`), atomic multi-seat Lua acquisition, and `lockToken` owner-verified release. |
+| **Seat Service & Controller** (`seat.service.ts`, `seat.controller.ts`) | Zero-DB seat locking & owner-verified seat release (`POST /lock`, `POST /release`), broadcasting state via `broadcastToShow()`. |
+| **Batch Unlock Queue & Worker** (`seatUnlockQueue.ts`, `seatUnlockWorker.ts`) | Single batch delayed expiry timer per reservation (colon-free `jobId` for BullMQ safety), broadcasting `seat_unlocked` without touching Postgres. |
+| **Booking Service** (`booking.service.ts`) | Pre-DB Redis lock verification, idempotent `paymentRefId` checks, atomic `updateMany` + `createMany` Guardrail #2, Redis drift self-healing, and `broadcastToShow()`. |
 
 ---
 
