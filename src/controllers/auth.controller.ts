@@ -1,11 +1,9 @@
 // src/controllers/auth.controller.ts
 import { Request, Response } from 'express'; // these are the ts types 
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../config/prisma';
 import bcrypt from 'bcryptjs';
 import { signupSchema, loginSchema } from '../validators/auth.validator'; // zod validators
 import { generateAccessToken, generateRefreshToken, hashToken } from '../utils/token.util';
-
-const prisma = new PrismaClient();
 
 export const signup = async (req: Request, res: Response): Promise<void> => {
   try {

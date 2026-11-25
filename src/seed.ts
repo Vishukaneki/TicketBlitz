@@ -1,7 +1,5 @@
 // src/seed.ts
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prisma } from './config/prisma';
 
 async function main() {
   console.log('🌱 Bawaal Seeding started...');

@@ -4,8 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon --watch src --ext ts --exec tsx src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "nodemon --watch src --ext ts --exec tsx src/server.ts",
+    "dev:api": "nodemon --watch src --ext ts --exec tsx src/server.ts",
+    "dev:worker": "nodemon --watch src --ext ts --exec tsx src/worker.ts",
+    "start": "node dist/server.js",
+    "start:api": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
     "build": "tsc"
   },
   "keywords": [],
@@ -14,6 +18,8 @@
   "type": "commonjs",
   "dependencies": {
     "@elastic/elasticsearch": "^8.19.1",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "@socket.io/redis-emitter": "^5.1.0",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.71.0",
     "cookie-parser": "^1.4.7",

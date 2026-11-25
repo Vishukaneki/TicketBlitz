@@ -3,12 +3,11 @@ import { Worker } from 'bullmq';
 import { bullMqConnection } from '../config/redis'; 
 import { sendTicketEmail } from '../config/mail';
 
-export const initNotificationWorker = () => {
+export const initNotificationWorker = (): Worker => {
   const worker = new Worker(
     'email-queue',
     async (job) => {
       console.log(`--Processing Email Job: ${job.id}`);
-
       await sendTicketEmail(job.data.to, job.data.bookingDetails);
     },
     { connection: bullMqConnection } 
@@ -21,4 +20,6 @@ export const initNotificationWorker = () => {
   worker.on('failed', (job, err) => {
     console.error(`--Email Job ${job?.id} failed:`, err.message);
   });
+
+  return worker;
 };

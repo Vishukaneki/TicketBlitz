@@ -1,8 +1,6 @@
 // src/services/seat.service.ts
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../config/prisma';
 import { redisClient } from '../config/redis';
-
-const prisma = new PrismaClient();
 
 const LOCK_DURATION_SECONDS = 600; // 10 minutes
 

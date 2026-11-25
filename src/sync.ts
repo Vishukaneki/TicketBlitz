@@ -1,8 +1,6 @@
 // src/sync.ts
-import { PrismaClient } from '@prisma/client';
+import { prisma } from './config/prisma';
 import { esClient } from './config/elasticsearch';
-
-const prisma = new PrismaClient();
 
 // ─── Step 1: Create index if it doesn't exist ─────────────────────────────────
 async function createIndexIfNotExists() {

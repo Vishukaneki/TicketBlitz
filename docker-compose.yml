@@ -17,6 +17,27 @@ services:
       timeout: 5s
       retries: 5
 
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.22.1
+    container_name: bms2_pgbouncer
+    restart: unless-stopped
+    environment:
+      - DB_USER=bms2
+      - DB_PASSWORD=bms2password
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=bms2db
+      - POOL_MODE=transaction
+      - MAX_CLIENT_CONN=10000
+      - DEFAULT_POOL_SIZE=25
+      - MIN_POOL_SIZE=5
+      - RESERVE_POOL_SIZE=5
+    ports:
+      - "6432:6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   redis:
     image: redis:7-alpine
     container_name: bms2_redis

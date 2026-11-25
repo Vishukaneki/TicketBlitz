@@ -2,9 +2,9 @@
 import { Worker, Job } from 'bullmq';
 import { bullMqConnection } from '../config/redis';
 import { unlockSeat } from '../services/seat.service';
-import { getIO } from '../sockets';
+import { broadcastToShow } from '../sockets';
 
-export const initSeatUnlockWorker = () => {
+export const initSeatUnlockWorker = (): Worker => {
   const worker = new Worker(
     'seat-unlock-queue',
     async (job: Job) => {
@@ -12,15 +12,11 @@ export const initSeatUnlockWorker = () => {
 
       await unlockSeat(showId, seatId);
 
-      try {
-        const io = getIO();
-        io.to(`show_${showId}`).emit('seat_unlocked', {
-          seatId,
-          status: 'AVAILABLE',
-        });
-      } catch (error) {
-        console.error('--Socket error during auto-unlock:', error);
-      }
+      // Broadcast across all pods via Redis
+      broadcastToShow(showId, 'seat_unlocked', {
+        seatId,
+        status: 'AVAILABLE',
+      });
     },
     { connection: bullMqConnection }
   );
@@ -32,4 +28,6 @@ export const initSeatUnlockWorker = () => {
   worker.on('failed', (job, err) => {
     console.error(`--Job failed for seat unlock ${job?.id}:`, err);
   });
+
+  return worker;
 };
